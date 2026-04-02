@@ -57,9 +57,9 @@ router.post('/parse', upload.single('file'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo enviado' });
 
   try {
-    const wb = XLSX.readFile(req.file.path);
+    const wb = XLSX.readFile(req.file.path, { codepage: 65001 });
     const ws = wb.Sheets[wb.SheetNames[0]];
-    const data = XLSX.utils.sheet_to_json(ws, { defval: '' });
+    const data = XLSX.utils.sheet_to_json(ws, { defval: '', raw: false });
 
     fs.unlinkSync(req.file.path);
 
