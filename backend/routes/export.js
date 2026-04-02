@@ -3,6 +3,50 @@ const router = express.Router();
 const XLSX = require('xlsx');
 const db = require('../db/database');
 
+// Cores da paleta original
+const COLORS = {
+  headerBg:     '1F3864', // azul escuro título
+  headerText:   'FFFFFF',
+  subHeaderBg:  '2E75B6', // azul médio subtítulo
+  subHeaderText:'FFFFFF',
+  colHeaderBg:  '1F3864', // azul escuro colunas
+  colHeaderText:'FFFFFF',
+  monthBg:      '2E75B6',
+  monthText:    'FFFFFF',
+  rowAlt:       'D6E4F0', // azul claro linhas pares
+  rowWhite:     'FFFFFF',
+  rateRowBg:    'EBF3FB', // azul bem claro taxas
+  avgBg:        'BDD7EE', // azul médio claro média
+  labelBg:      'D6E4F0',
+  border:       '2E75B6',
+};
+
+function cell(ws, r, c, value, style) {
+  const addr = XLSX.utils.encode_cell({ r, c });
+  ws[addr] = { v: value, t: typeof value === 'number' ? 'n' : 's', s: style };
+}
+
+function buildStyle({ bgColor, fontColor, bold, fontSize, hAlign, border, wrapText } = {}) {
+  const s = {};
+  if (bgColor) s.fill = { fgColor: { rgb: bgColor }, patternType: 'solid' };
+  s.font = {
+    name: 'Arial',
+    sz: fontSize || 10,
+    bold: bold || false,
+    color: { rgb: fontColor || '000000' }
+  };
+  s.alignment = {
+    horizontal: hAlign || 'left',
+    vertical: 'center',
+    wrapText: wrapText || false
+  };
+  if (border) {
+    const b = { style: 'thin', color: { rgb: COLORS.border } };
+    s.border = { top: b, bottom: b, left: b, right: b };
+  }
+  return s;
+}
+
 router.get('/', async (req, res) => {
   const { project_id } = req.query;
   try {
@@ -15,12 +59,8 @@ router.get('/', async (req, res) => {
     query += ' ORDER BY p.name, COALESCE(m.week_start, make_date(m.year, COALESCE(m.month,1), 1)) ASC';
 
     const { rows } = await db.query(query, params);
+    if (!rows.length) return res.status(404).json({ error: 'Nenhum dado encontrado' });
 
-    if (!rows.length) {
-      return res.status(404).json({ error: 'Nenhum dado encontrado' });
-    }
-
-    // Agrupa por projeto
     const byProject = {};
     for (const r of rows) {
       if (!byProject[r.project_name]) byProject[r.project_name] = [];
@@ -30,75 +70,140 @@ router.get('/', async (req, res) => {
     const wb = XLSX.utils.book_new();
 
     for (const [projectName, metrics] of Object.entries(byProject)) {
-      // Semanas como colunas
       const weeks = metrics.map(m => m.week_label || `${m.month}/${m.year}`);
+      const monthLabels = metrics.map(m => m.month_label ? `${m.month_label}/${m.year}` : `${m.month}/${m.year}`);
       const numWeeks = weeks.length;
+      const totalCols = numWeeks + 2; // label + semanas + média
 
-      // Monta array de arrays (sheet_from_array_of_arrays)
-      const aoa = [];
+      const ws = {};
+      ws['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: 13, c: totalCols - 1 } });
 
-      // Linha 1: título
-      aoa.push(['Nuvant Performance', ...Array(numWeeks + 1).fill('')]);
+      // Merges
+      ws['!merges'] = [
+        { s: { r: 0, c: 0 }, e: { r: 0, c: totalCols - 1 } }, // título
+        { s: { r: 1, c: 0 }, e: { r: 1, c: totalCols - 1 } }, // subtítulo
+      ];
 
-      // Linha 2: subtítulo
-      aoa.push(['INDICADORES DE DESEMPENHO', ...Array(numWeeks + 1).fill('')]);
+      // ROW 0: Título
+      cell(ws, 0, 0, 'Nuvant Performance — Indicadores de Desempenho', buildStyle({
+        bgColor: COLORS.headerBg, fontColor: COLORS.headerText,
+        bold: true, fontSize: 13, hAlign: 'center', border: true
+      }));
+      for (let c = 1; c < totalCols; c++) {
+        cell(ws, 0, c, '', buildStyle({ bgColor: COLORS.headerBg, border: true }));
+      }
 
-      // Linha 3: vazia
-      aoa.push([]);
+      // ROW 1: Projeto
+      cell(ws, 1, 0, `Projeto: ${projectName}`, buildStyle({
+        bgColor: COLORS.subHeaderBg, fontColor: COLORS.subHeaderText,
+        bold: true, fontSize: 11, hAlign: 'center', border: true
+      }));
+      for (let c = 1; c < totalCols; c++) {
+        cell(ws, 1, c, '', buildStyle({ bgColor: COLORS.subHeaderBg, border: true }));
+      }
 
-      // Linha 4: cabeçalhos — Métrica | semana1 | semana2 | ... | Média
-      aoa.push(['Métrica', ...weeks, 'Média']);
+      // ROW 2: vazia
+      for (let c = 0; c < totalCols; c++) {
+        cell(ws, 2, c, '', {});
+      }
 
-      // Linha 5: Mês de cada semana
-      aoa.push(['Mês/Ano', ...metrics.map(m => m.month_label ? `${m.month_label}/${m.year}` : `${m.month}/${m.year}`), '']);
+      // ROW 3: Cabeçalhos semanas
+      cell(ws, 3, 0, 'Métrica', buildStyle({
+        bgColor: COLORS.colHeaderBg, fontColor: COLORS.colHeaderText,
+        bold: true, hAlign: 'center', border: true
+      }));
+      for (let i = 0; i < numWeeks; i++) {
+        cell(ws, 3, i + 1, weeks[i], buildStyle({
+          bgColor: COLORS.colHeaderBg, fontColor: COLORS.colHeaderText,
+          bold: true, hAlign: 'center', border: true
+        }));
+      }
+      cell(ws, 3, numWeeks + 1, 'Média', buildStyle({
+        bgColor: COLORS.colHeaderBg, fontColor: COLORS.colHeaderText,
+        bold: true, hAlign: 'center', border: true
+      }));
 
-      // Helper: média ignorando zeros
+      // ROW 4: Mês/Ano
+      cell(ws, 4, 0, 'Mês/Ano', buildStyle({
+        bgColor: COLORS.monthBg, fontColor: COLORS.monthText,
+        bold: true, hAlign: 'center', border: true
+      }));
+      for (let i = 0; i < numWeeks; i++) {
+        cell(ws, 4, i + 1, monthLabels[i], buildStyle({
+          bgColor: COLORS.monthBg, fontColor: COLORS.monthText,
+          hAlign: 'center', border: true
+        }));
+      }
+      cell(ws, 4, numWeeks + 1, '', buildStyle({ bgColor: COLORS.monthBg, border: true }));
+
+      // Métricas
+      const metricRows = [
+        { label: 'Envios',          key: 'sends',       rate: false },
+        { label: 'Aberturas',       key: 'opens',       rate: false },
+        { label: 'Cliques',         key: 'clicks',      rate: false },
+        { label: 'Unsubs',          key: 'unsubs',      rate: false },
+        { label: 'Bounces',         key: 'bounces',     rate: false },
+        { label: 'Open Rate (%)',   key: 'open_rate',   rate: true  },
+        { label: 'CTR (%)',         key: 'ctr',         rate: true  },
+        { label: 'Unsub Rate (%)',  key: 'unsub_rate',  rate: true  },
+        { label: 'Bounce Rate (%)', key: 'bounce_rate', rate: true  },
+      ];
+
       const avg = (arr) => {
         const nonZero = arr.filter(v => v > 0);
         if (!nonZero.length) return 0;
         return parseFloat((nonZero.reduce((a, b) => a + b, 0) / nonZero.length).toFixed(2));
       };
 
-      const fmt = (v, isRate) => isRate ? `${v}%` : v;
-
-      // Linhas de métricas
-      const metricRows = [
-        { label: 'Envios',          key: 'sends',        rate: false },
-        { label: 'Aberturas',       key: 'opens',        rate: false },
-        { label: 'Cliques',         key: 'clicks',       rate: false },
-        { label: 'Unsubs',          key: 'unsubs',       rate: false },
-        { label: 'Bounces',         key: 'bounces',      rate: false },
-        { label: 'Open Rate (%)',   key: 'open_rate',    rate: true  },
-        { label: 'CTR (%)',         key: 'ctr',          rate: true  },
-        { label: 'Unsub Rate (%)',  key: 'unsub_rate',   rate: true  },
-        { label: 'Bounce Rate (%)', key: 'bounce_rate',  rate: true  },
-      ];
-
-      for (const { label, key, rate } of metricRows) {
+      metricRows.forEach(({ label, key, rate }, idx) => {
+        const rowIdx = 5 + idx;
+        const isEven = idx % 2 === 0;
+        const rowBg = rate ? COLORS.rateRowBg : (isEven ? COLORS.rowWhite : COLORS.rowAlt);
         const values = metrics.map(m => m[key] || 0);
         const media = avg(values);
-        aoa.push([
-          label,
-          ...values.map(v => fmt(v, rate)),
-          fmt(media, rate)
-        ]);
-      }
 
-      const ws = XLSX.utils.aoa_to_sheet(aoa);
+        // Label
+        cell(ws, rowIdx, 0, label, buildStyle({
+          bgColor: COLORS.labelBg, bold: true, border: true
+        }));
 
-      // Larguras das colunas
+        // Valores
+        for (let i = 0; i < numWeeks; i++) {
+          const v = values[i];
+          const display = rate ? `${v}%` : v;
+          cell(ws, rowIdx, i + 1, display, buildStyle({
+            bgColor: rowBg, hAlign: rate ? 'center' : 'right', border: true
+          }));
+        }
+
+        // Média
+        const mediaDisplay = rate ? `${media}%` : media;
+        cell(ws, rowIdx, numWeeks + 1, mediaDisplay, buildStyle({
+          bgColor: COLORS.avgBg, bold: true, hAlign: 'center', border: true
+        }));
+      });
+
+      // Larguras fixas
       ws['!cols'] = [
-        { wch: 18 },
-        ...weeks.map(() => ({ wch: 14 })),
-        { wch: 12 }
+        { wpx: 140 },
+        ...weeks.map(() => ({ wpx: 110 })),
+        { wpx: 90 }
       ];
 
-      // Nome da aba limitado a 31 chars (limite do Excel)
-      const sheetName = projectName.slice(0, 31);
-      XLSX.utils.book_append_sheet(wb, ws, sheetName);
+      // Alturas
+      ws['!rows'] = [
+        { hpx: 30 }, // título
+        { hpx: 22 }, // projeto
+        { hpx: 8  }, // vazia
+        { hpx: 22 }, // semanas
+        { hpx: 20 }, // mês
+        ...metricRows.map(() => ({ hpx: 20 }))
+      ];
+
+      XLSX.utils.book_append_sheet(wb, ws, projectName.slice(0, 31));
     }
 
-    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx', cellStyles: true });
 
     res.setHeader('Content-Disposition', 'attachment; filename="nuvant-indicadores.xlsx"');
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
